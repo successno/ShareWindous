@@ -197,10 +197,12 @@ private struct ShareOverlayRootView: View {
 
             panel
                 .frame(height: panelHeight)
+                .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .padding(.horizontal, 10)
                 .padding(.bottom, overlayBottomPadding)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .ignoresSafeArea()
     }
 
@@ -214,6 +216,13 @@ private struct ShareOverlayRootView: View {
 public enum ShareOverlayPresenter {
     private static weak var overlayContainerView: UIView?
     private static weak var hostingController: UIViewController?
+    private static weak var overlayWindow: UIWindow?
+
+    private static var keyWindow: UIWindow? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.flatMap(\.windows).first(where: \.isKeyWindow)
+            ?? scenes.flatMap(\.windows).first(where: { $0.windowLevel == .normal })
+    }
 
     public static func present(
         on viewController: UIViewController,
@@ -228,8 +237,8 @@ public enum ShareOverlayPresenter {
         DispatchQueue.main.async {
             dismiss()
 
-            let hostVC = viewController.topMostViewController()
-            guard let hostView = hostVC.view else { return }
+            guard let window = keyWindow else { return }
+            let parentVC = viewController.topMostViewController()
 
             let panelHeight = ShareSheetMetrics.overlayPanelHeight(optionCount: optionCount)
             let panel = SharePanelContent(
@@ -250,14 +259,26 @@ public enum ShareOverlayPresenter {
             let hosting = UIHostingController(rootView: rootView)
             hosting.view.backgroundColor = .clear
             hosting.view.translatesAutoresizingMaskIntoConstraints = false
+            hosting.view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            hosting.view.setContentHuggingPriority(.defaultLow, for: .vertical)
+            hosting.view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            hosting.view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
-            let container = UIView(frame: hostView.bounds)
-            container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            let container = UIView()
+            container.translatesAutoresizingMaskIntoConstraints = false
             container.backgroundColor = .clear
             container.alpha = 0
+            container.isUserInteractionEnabled = true
 
-            hostView.addSubview(container)
-            hostVC.addChild(hosting)
+            window.addSubview(container)
+            NSLayoutConstraint.activate([
+                container.topAnchor.constraint(equalTo: window.topAnchor),
+                container.leadingAnchor.constraint(equalTo: window.leadingAnchor),
+                container.trailingAnchor.constraint(equalTo: window.trailingAnchor),
+                container.bottomAnchor.constraint(equalTo: window.bottomAnchor)
+            ])
+
+            parentVC.addChild(hosting)
             container.addSubview(hosting.view)
             NSLayoutConstraint.activate([
                 hosting.view.topAnchor.constraint(equalTo: container.topAnchor),
@@ -265,10 +286,13 @@ public enum ShareOverlayPresenter {
                 hosting.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
                 hosting.view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
             ])
-            hosting.didMove(toParent: hostVC)
+            hosting.didMove(toParent: parentVC)
+
+            window.layoutIfNeeded()
 
             overlayContainerView = container
             hostingController = hosting
+            overlayWindow = window
 
             UIView.animate(withDuration: 0.28, delay: 0, options: .curveEaseOut) {
                 container.alpha = 1
