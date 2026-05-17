@@ -215,8 +215,8 @@ private struct ShareOverlayRootView: View {
 
 public enum ShareOverlayPresenter {
     private static weak var overlayContainerView: UIView?
-    private static weak var hostingController: UIViewController?
-    private static weak var overlayWindow: UIWindow?
+    /// 强引用，避免未加入 VC 层级时被释放
+    private static var overlayHostingController: UIViewController?
 
     private static var keyWindow: UIWindow? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -224,6 +224,15 @@ public enum ShareOverlayPresenter {
             ?? scenes.flatMap(\.windows).first(where: { $0.windowLevel == .normal })
     }
 
+    private static func runOnMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    /// 仅挂载 view 到 window，不把 UIHostingController addChild 到 SwiftUI 页面（避免层级崩溃）
     public static func present(
         on viewController: UIViewController,
         title: String,
@@ -234,11 +243,11 @@ public enum ShareOverlayPresenter {
         optionCount: Int = 3,
         onShareComplete: @escaping (Bool, String) -> Void
     ) {
-        DispatchQueue.main.async {
-            dismiss()
+        runOnMain {
+            _ = viewController
+            tearDown(animated: false)
 
             guard let window = keyWindow else { return }
-            let parentVC = viewController.topMostViewController()
 
             let panelHeight = ShareSheetMetrics.overlayPanelHeight(optionCount: optionCount)
             let panel = SharePanelContent(
@@ -278,7 +287,6 @@ public enum ShareOverlayPresenter {
                 container.bottomAnchor.constraint(equalTo: window.bottomAnchor)
             ])
 
-            parentVC.addChild(hosting)
             container.addSubview(hosting.view)
             NSLayoutConstraint.activate([
                 hosting.view.topAnchor.constraint(equalTo: container.topAnchor),
@@ -286,13 +294,11 @@ public enum ShareOverlayPresenter {
                 hosting.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
                 hosting.view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
             ])
-            hosting.didMove(toParent: parentVC)
 
             window.layoutIfNeeded()
 
             overlayContainerView = container
-            hostingController = hosting
-            overlayWindow = window
+            overlayHostingController = hosting
 
             UIView.animate(withDuration: 0.28, delay: 0, options: .curveEaseOut) {
                 container.alpha = 1
@@ -301,20 +307,33 @@ public enum ShareOverlayPresenter {
     }
 
     public static func dismiss() {
-        DispatchQueue.main.async {
-            guard let container = overlayContainerView else { return }
-            let hosting = hostingController
+        runOnMain {
+            tearDown(animated: true)
+        }
+    }
 
+    private static func tearDown(animated: Bool, completion: (() -> Void)? = nil) {
+        guard let container = overlayContainerView else {
+            completion?()
+            return
+        }
+
+        let finish = {
+            overlayHostingController?.view.removeFromSuperview()
+            overlayHostingController = nil
+            container.removeFromSuperview()
+            overlayContainerView = nil
+            completion?()
+        }
+
+        if animated {
             UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseIn) {
                 container.alpha = 0
             } completion: { _ in
-                hosting?.willMove(toParent: nil)
-                hosting?.view.removeFromSuperview()
-                hosting?.removeFromParent()
-                container.removeFromSuperview()
-                overlayContainerView = nil
-                hostingController = nil
+                finish()
             }
+        } else {
+            finish()
         }
     }
 }

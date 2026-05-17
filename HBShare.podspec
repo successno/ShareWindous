@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'HBShare'
-  s.version          = '0.1.3'
+  s.version          = '0.1.4'
   s.summary          = 'iOS 分享面板与微信 SDK 封装（ShareView + WeChatManager）'
   s.description      = '可复用 CocoaPod：分享面板、微信 SDK 桥接、SwiftUI Host。'
   s.homepage         = 'https://github.com/successno/ShareWindous'
