@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UIKit
 
 public class SwiftUIHostController<Content: View>: UIHostingController<Content> {
     public var shareCompletion: ((Bool, String) -> Void)?
@@ -15,7 +16,7 @@ public class SwiftUIHostController<Content: View>: UIHostingController<Content> 
     }
 }
 
-// MARK: - Sheet 高度（与内容白底区域对齐）
+// MARK: - Sheet 高度
 
 private struct ShareSheetHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
@@ -43,7 +44,6 @@ private struct ShareSheetPresentationModifier: ViewModifier {
 }
 
 public enum ShareSheetMetrics {
-    /// 分享渠道数量，用于估算 Sheet 高度（默认 3：微信好友 / 朋友圈 / 复制链接）
     public static func estimatedHeight(optionCount: Int = 3) -> CGFloat {
         let count = max(1, optionCount)
         let columnCount = max(1, min(count, 4))
@@ -54,9 +54,70 @@ public enum ShareSheetMetrics {
         return CGFloat(rows) * rowHeight + gridVerticalPadding + containerVerticalPadding + sheetChromeHeight
     }
 
-    /// 系统 Sheet 顶部拖拽条等占位
+    /// SwiftUI `.sheet` 顶部拖拽条占位（overlay 模式不需要）
     public static let sheetChromeHeight: CGFloat = 20
+
+    /// 贴底 overlay 面板高度（不含 sheet chrome）
+    public static func overlayPanelHeight(optionCount: Int = 3) -> CGFloat {
+        estimatedHeight(optionCount: optionCount) - sheetChromeHeight
+    }
 }
+
+// MARK: - 分享面板内容（Sheet / Overlay 共用）
+
+public struct SharePanelContent: View {
+    public let title: String
+    public let url: String
+    public let text: String
+    public let imageUrl: String
+    public let webView: WKWebView?
+    public var onShareComplete: (Bool, String) -> Void
+    public var onDismiss: (() -> Void)?
+
+    public init(
+        title: String,
+        url: String,
+        text: String,
+        imageUrl: String,
+        webView: WKWebView?,
+        onShareComplete: @escaping (Bool, String) -> Void,
+        onDismiss: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.url = url
+        self.text = text
+        self.imageUrl = imageUrl
+        self.webView = webView
+        self.onShareComplete = onShareComplete
+        self.onDismiss = onDismiss
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            ShareView(
+                shareOptions: [.wechat, .wechatTimeline, .copyLink],
+                currentWebView: webView,
+                shareUrl: url.isEmpty ? nil : url,
+                shareTitle: title.isEmpty ? nil : title,
+                shareInfo: text.isEmpty ? nil : text,
+                shareImg: imageUrl.isEmpty ? nil : imageUrl
+            )
+            .padding(.vertical, 20)
+        }
+        .frame(maxWidth: .infinity)
+        .background(Color.white)
+        .onReceive(NotificationCenter.default.publisher(for: HBShareNotification.shareComplete)) { notification in
+            if let userInfo = notification.userInfo,
+               let success = userInfo["success"] as? Bool,
+               let message = userInfo["message"] as? String {
+                onShareComplete(success, message)
+                onDismiss?()
+            }
+        }
+    }
+}
+
+// MARK: - SwiftUI `.sheet` 容器
 
 public struct ShareSheetContainer: View {
     @Environment(\.dismiss) private var dismiss
@@ -69,7 +130,6 @@ public struct ShareSheetContainer: View {
     public var onShareComplete: (Bool, String) -> Void
 
     private let optionCount: Int
-
     @State private var contentHeight: CGFloat = ShareSheetMetrics.estimatedHeight(optionCount: 3)
 
     public init(
@@ -96,22 +156,18 @@ public struct ShareSheetContainer: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            ShareView(
-                shareOptions: [.wechat, .wechatTimeline, .copyLink],
-                currentWebView: webView,
-                shareUrl: url.isEmpty ? nil : url,
-                shareTitle: title.isEmpty ? nil : title,
-                shareInfo: text.isEmpty ? nil : text,
-                shareImg: imageUrl.isEmpty ? nil : imageUrl
-            )
-            .padding(.vertical, 20)
-        }
-        .frame(maxWidth: .infinity)
+        SharePanelContent(
+            title: title,
+            url: url,
+            text: text,
+            imageUrl: imageUrl,
+            webView: webView,
+            onShareComplete: onShareComplete,
+            onDismiss: { dismiss() }
+        )
         .background(
             GeometryReader { geometry in
-                Color.white
-                    .preference(key: ShareSheetHeightPreferenceKey.self, value: geometry.size.height)
+                Color.clear.preference(key: ShareSheetHeightPreferenceKey.self, value: geometry.size.height)
             }
         )
         .onPreferenceChange(ShareSheetHeightPreferenceKey.self) { measured in
@@ -122,12 +178,118 @@ public struct ShareSheetContainer: View {
             }
         }
         .modifier(ShareSheetPresentationModifier(height: sheetDetentHeight))
-        .onReceive(NotificationCenter.default.publisher(for: HBShareNotification.shareComplete)) { notification in
-            if let userInfo = notification.userInfo,
-               let success = userInfo["success"] as? Bool,
-               let message = userInfo["message"] as? String {
-                onShareComplete(success, message)
-                dismiss()
+    }
+}
+
+// MARK: - Overlay（UIKit / H5 用，与 SwiftUI sheet 视觉一致）
+
+private struct ShareOverlayRootView: View {
+    let panel: SharePanelContent
+    let panelHeight: CGFloat
+    let onClose: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.opacity(0.5)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { onClose() }
+
+            panel
+                .frame(height: panelHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .padding(.horizontal, 10)
+                .padding(.bottom, overlayBottomPadding)
+        }
+        .ignoresSafeArea()
+    }
+
+    private var overlayBottomPadding: CGFloat {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes.flatMap(\.windows).first { $0.isKeyWindow }
+        return max(window?.safeAreaInsets.bottom ?? 0, 8)
+    }
+}
+
+public enum ShareOverlayPresenter {
+    private static weak var overlayContainerView: UIView?
+    private static weak var hostingController: UIViewController?
+
+    public static func present(
+        on viewController: UIViewController,
+        title: String,
+        url: String,
+        text: String,
+        imageUrl: String,
+        webView: WKWebView?,
+        optionCount: Int = 3,
+        onShareComplete: @escaping (Bool, String) -> Void
+    ) {
+        DispatchQueue.main.async {
+            dismiss()
+
+            let hostVC = viewController.topMostViewController()
+            guard let hostView = hostVC.view else { return }
+
+            let panelHeight = ShareSheetMetrics.overlayPanelHeight(optionCount: optionCount)
+            let panel = SharePanelContent(
+                title: title,
+                url: url,
+                text: text,
+                imageUrl: imageUrl,
+                webView: webView,
+                onShareComplete: onShareComplete,
+                onDismiss: { dismiss() }
+            )
+            let rootView = ShareOverlayRootView(
+                panel: panel,
+                panelHeight: panelHeight,
+                onClose: { dismiss() }
+            )
+
+            let hosting = UIHostingController(rootView: rootView)
+            hosting.view.backgroundColor = .clear
+            hosting.view.translatesAutoresizingMaskIntoConstraints = false
+
+            let container = UIView(frame: hostView.bounds)
+            container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            container.backgroundColor = .clear
+            container.alpha = 0
+
+            hostView.addSubview(container)
+            hostVC.addChild(hosting)
+            container.addSubview(hosting.view)
+            NSLayoutConstraint.activate([
+                hosting.view.topAnchor.constraint(equalTo: container.topAnchor),
+                hosting.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                hosting.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                hosting.view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            ])
+            hosting.didMove(toParent: hostVC)
+
+            overlayContainerView = container
+            hostingController = hosting
+
+            UIView.animate(withDuration: 0.28, delay: 0, options: .curveEaseOut) {
+                container.alpha = 1
+            }
+        }
+    }
+
+    public static func dismiss() {
+        DispatchQueue.main.async {
+            guard let container = overlayContainerView else { return }
+            let hosting = hostingController
+
+            UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseIn) {
+                container.alpha = 0
+            } completion: { _ in
+                hosting?.willMove(toParent: nil)
+                hosting?.view.removeFromSuperview()
+                hosting?.removeFromParent()
+                container.removeFromSuperview()
+                overlayContainerView = nil
+                hostingController = nil
             }
         }
     }
